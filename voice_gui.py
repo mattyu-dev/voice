@@ -61,11 +61,13 @@ class AppConfig:
     language: str = "auto"  # auto|en|fr
     device: str = "cpu"  # cpu|cuda
     compute_type: str = "int8"  # int8 (cpu), float16 (cuda), etc.
-    paste_after_copy: bool = False
+    # clipboard: copy transcript to clipboard
+    # paste: paste into the currently focused app (Wispr-like)
+    output_mode: str = "paste"
+    preserve_clipboard: bool = True
     vad_filter: bool = False
     always_on_top: bool = True
     show_bar: bool = True
-    show_transcript_toast: bool = True
     remember_position: bool = False
     window_pos: Optional[Tuple[int, int]] = None
 
@@ -75,6 +77,9 @@ def load_config() -> AppConfig:
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
+        # Migrations from older configs.
+        if "output_mode" not in raw and "paste_after_copy" in raw:
+            raw["output_mode"] = "paste" if raw.get("paste_after_copy") else "clipboard"
         cfg = AppConfig(**{k: raw[k] for k in raw.keys() if k in AppConfig.__annotations__})
         return cfg
     except FileNotFoundError:
@@ -197,8 +202,16 @@ class SettingsDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.lang_combo.setCurrentIndex(idx)
 
-        self.paste_chk = QtWidgets.QCheckBox("Auto-paste after copying (Ctrl/Cmd+V)")
-        self.paste_chk.setChecked(bool(cfg.paste_after_copy))
+        self.output_combo = QtWidgets.QComboBox()
+        self.output_combo.addItem("Paste into active app (Wispr-like)", "paste")
+        self.output_combo.addItem("Copy to clipboard", "clipboard")
+        idx = self.output_combo.findData(cfg.output_mode)
+        if idx >= 0:
+            self.output_combo.setCurrentIndex(idx)
+
+        self.preserve_clip_chk = QtWidgets.QCheckBox("Preserve clipboard when pasting")
+        self.preserve_clip_chk.setChecked(bool(cfg.preserve_clipboard))
+        self.output_combo.currentIndexChanged.connect(self._sync_output_state)
 
         self.vad_chk = QtWidgets.QCheckBox("Enable VAD filter (helps with long silences)")
         self.vad_chk.setChecked(bool(cfg.vad_filter))
@@ -212,19 +225,16 @@ class SettingsDialog(QtWidgets.QDialog):
         self.remember_pos_chk = QtWidgets.QCheckBox("Remember last dragged position (otherwise bottom-center)")
         self.remember_pos_chk.setChecked(bool(cfg.remember_position))
 
-        self.toast_chk = QtWidgets.QCheckBox("Show transcript bubble after release")
-        self.toast_chk.setChecked(bool(cfg.show_transcript_toast))
-
         form = QtWidgets.QFormLayout()
         form.addRow("Hotkey (push-to-talk)", self.hotkey_edit)
         form.addRow("Model", self.model_combo)
         form.addRow("Language", self.lang_combo)
-        form.addRow("", self.paste_chk)
+        form.addRow("Output", self.output_combo)
+        form.addRow("", self.preserve_clip_chk)
         form.addRow("", self.vad_chk)
         form.addRow("", self.on_top_chk)
         form.addRow("", self.show_bar_chk)
         form.addRow("", self.remember_pos_chk)
-        form.addRow("", self.toast_chk)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -234,6 +244,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(btns)
         self.setLayout(layout)
+        self._sync_output_state()
 
     def eventFilter(self, obj, event):
         if obj is self.hotkey_edit and event.type() == QtCore.QEvent.KeyPress:
@@ -246,16 +257,20 @@ class SettingsDialog(QtWidgets.QDialog):
                 return True
         return super().eventFilter(obj, event)
 
+    def _sync_output_state(self):
+        is_paste = str(self.output_combo.currentData()) == "paste"
+        self.preserve_clip_chk.setEnabled(is_paste)
+
     def updated_config(self) -> AppConfig:
         cfg = AppConfig(**asdict(self._cfg))
         cfg.hotkey = (self.hotkey_edit.text() or "f9").strip().lower()
         cfg.model = self.model_combo.currentText().strip()
         cfg.language = str(self.lang_combo.currentData())
-        cfg.paste_after_copy = bool(self.paste_chk.isChecked())
+        cfg.output_mode = str(self.output_combo.currentData())
+        cfg.preserve_clipboard = bool(self.preserve_clip_chk.isChecked())
         cfg.vad_filter = bool(self.vad_chk.isChecked())
         cfg.always_on_top = bool(self.on_top_chk.isChecked())
         cfg.show_bar = bool(self.show_bar_chk.isChecked())
-        cfg.show_transcript_toast = bool(self.toast_chk.isChecked())
         cfg.remember_position = bool(self.remember_pos_chk.isChecked())
         return cfg
 
@@ -378,7 +393,7 @@ class Overlay(QtWidgets.QWidget):
     stop_requested = QtCore.Signal()
 
     def __init__(self, cfg: AppConfig):
-        flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool
+        flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool | QtCore.Qt.WindowDoesNotAcceptFocus
         if cfg.always_on_top:
             flags |= QtCore.Qt.WindowStaysOnTopHint
         super().__init__(None, flags)
@@ -391,6 +406,7 @@ class Overlay(QtWidgets.QWidget):
 
         self.container = QtWidgets.QFrame()
         self.container.setObjectName("container")
+        self.container.setAttribute(QtCore.Qt.WA_StyledBackground, True)
 
         self.indicator = IndicatorWidget()
         self.stop_btn = StopButton()
@@ -433,14 +449,14 @@ class Overlay(QtWidgets.QWidget):
             #container {{
               background: {bg};
               border: 1px solid {border};
-              border-radius: 999px;
+              border-radius: 9999px;
             }}
             """
         )
 
     def set_config(self, cfg: AppConfig):
         self._cfg = cfg
-        flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool
+        flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool | QtCore.Qt.WindowDoesNotAcceptFocus
         if cfg.always_on_top:
             flags |= QtCore.Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -464,13 +480,8 @@ class Overlay(QtWidgets.QWidget):
         self._autosize()
 
     def show_transcript(self, text: str, lang: str = "", prob: float = 0.0):
+        # Keep the Flow bar minimal: no transcript bubble.
         self.set_state_idle()
-        if not self._cfg.show_transcript_toast:
-            QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(self.width() // 2, 0)), "Copied", self)
-            return
-        prefix = f"{lang.upper()} " if lang else ""
-        msg = f"{prefix}{text}".strip()
-        QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(self.width() // 2, 0)), msg, self)
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent):
         if event.button() == QtCore.Qt.LeftButton:
@@ -611,6 +622,24 @@ class App(QtCore.QObject):
                 self._model = WhisperModel(self.cfg.model, device=self.cfg.device, compute_type=self.cfg.compute_type)
             return self._model
 
+    def _notify(self, title: str, message: str):
+        try:
+            self.tray.showMessage(title, message, QtWidgets.QSystemTrayIcon.Information, 3000)
+        except Exception:
+            pass
+
+    def _clone_mime_data(self, md: QtCore.QMimeData) -> QtCore.QMimeData:
+        clone = QtCore.QMimeData()
+        try:
+            for fmt in md.formats():
+                try:
+                    clone.setData(fmt, md.data(fmt))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return clone
+
     @QtCore.Slot()
     def on_ptt_pressed(self):
         if self._transcribing:
@@ -622,7 +651,9 @@ class App(QtCore.QObject):
             if self.cfg.show_bar:
                 self.overlay.set_state_recording()
         except Exception as e:
-            self.overlay.show_transcript(f"Mic error: {e}")
+            self._notify(APP_NAME, f"Microphone error: {e}")
+            if self.cfg.show_bar:
+                self.overlay.set_state_idle()
 
     @QtCore.Slot()
     def on_ptt_released(self):
@@ -659,24 +690,28 @@ class App(QtCore.QObject):
         self._transcribing = False
         text = (text or "").strip()
         if not text:
+            self._notify(APP_NAME, "No speech detected.")
             if self.cfg.show_bar:
-                self.overlay.show_transcript("...")
+                self.overlay.set_state_idle()
             return
 
-        QtWidgets.QApplication.clipboard().setText(text)
-        if self.cfg.paste_after_copy:
-            self._paste_now()
+        mode = (self.cfg.output_mode or "paste").strip().lower()
+        if mode == "clipboard":
+            QtWidgets.QApplication.clipboard().setText(text)
+        else:
+            self._paste_transcript(text)
 
         if self.cfg.show_bar:
-            self.overlay.show_transcript(text, lang=lang, prob=prob)
+            self.overlay.set_state_idle()
 
     @QtCore.Slot(str)
     def on_transcribe_failed(self, err: str):
         self._transcribing = False
+        self._notify(APP_NAME, f"Transcription error: {err}")
         if self.cfg.show_bar:
-            self.overlay.show_transcript(f"ASR error: {err}")
+            self.overlay.set_state_idle()
 
-    def _paste_now(self):
+    def _send_paste_shortcut(self):
         is_macos = platform.system().lower() == "darwin"
         mod = keyboard.Key.cmd if is_macos else keyboard.Key.ctrl
         ctl = keyboard.Controller()
@@ -688,6 +723,23 @@ class App(QtCore.QObject):
                 ctl.release("v")
         except Exception:
             pass
+
+    def _paste_transcript(self, text: str):
+        clip = QtWidgets.QApplication.clipboard()
+        old_md = None
+        if self.cfg.preserve_clipboard:
+            old_md = self._clone_mime_data(clip.mimeData())
+
+        clip.setText(text)
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.05)
+        self._send_paste_shortcut()
+
+        if old_md is not None:
+            # Give the target app a moment to pull from clipboard.
+            time.sleep(0.12)
+            clip.setMimeData(old_md)
+            QtWidgets.QApplication.processEvents()
 
     @QtCore.Slot()
     def show_settings(self):
@@ -740,20 +792,6 @@ class App(QtCore.QObject):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    # Wispr-ish tooltips for transcript bubble.
-    app.setStyleSheet(
-        """
-        QToolTip {
-          background-color: rgba(10, 12, 16, 240);
-          color: #F9FAFB;
-          border: 1px solid rgba(255,255,255,0.14);
-          border-radius: 12px;
-          padding: 8px 10px;
-          font-size: 12px;
-          font-weight: 600;
-        }
-        """
-    )
     _ = App()
     sys.exit(app.exec())
 

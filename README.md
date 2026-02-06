@@ -2,7 +2,7 @@
 
 Minimal push-to-talk local transcription (Windows + macOS).
 
-Goal: hold a hotkey, speak, release to transcribe, copy transcript to clipboard. Audio stays local.
+Goal: hold a hotkey, speak, release to transcribe. Output can either paste into the active app (Wispr-like) or copy to clipboard. Audio stays local.
 
 ## Prereqs
 
@@ -29,7 +29,7 @@ python -m pip install -r requirements.txt
 python .\voice_gui.py
 ```
 
-Hold your hotkey (default `F9`) to record, release to transcribe. The transcript is copied to clipboard.
+Hold your hotkey (default `F9`) to record, release to transcribe.
 
 For best results:
 - English-only: use `--model base.en` (smaller/faster)
@@ -37,11 +37,13 @@ For best results:
 
 ## Settings
 
-Use the overlay menu `⋯` or tray icon to open Settings:
+Right-click the Flow bar or use the tray icon to open Settings:
 - Hotkey (push-to-talk)
 - Model (tiny/base/small, multilingual or `.en`)
 - Language (auto/en/fr)
-- Auto-paste after copying (Ctrl/Cmd+V)
+- Output (paste into active app or copy to clipboard)
+- Preserve clipboard when pasting
+- Remember last dragged position (otherwise bottom-center)
 
 ## Privacy
 
