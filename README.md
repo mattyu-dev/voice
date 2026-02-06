@@ -40,10 +40,13 @@ For best results:
 Right-click the Flow bar or use the tray icon to open Settings:
 - Hotkey (push-to-talk)
 - Model (tiny/base/small, multilingual or `.en`)
+- Microphone (pick the right input device)
 - Language (auto/en/fr)
 - Theme (system/dark/light)
 - Output (paste into active app or copy to clipboard)
+- Insert method (type into app, or clipboard + Ctrl/Cmd+V)
 - Preserve clipboard when pasting
+- VAD filter (recommended for long pauses)
 - Remember last dragged position (otherwise bottom-center)
 
 ## Privacy

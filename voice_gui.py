@@ -66,12 +66,18 @@ class AppConfig:
     language: str = "auto"  # auto|en|fr
     device: str = "cpu"  # cpu|cuda
     compute_type: str = "int8"  # int8 (cpu), float16 (cuda), etc.
+    # sounddevice input device index (None = system default)
+    input_device: Optional[int] = None
     theme: str = "system"  # system|dark|light
     # clipboard: copy transcript to clipboard
     # paste: paste into the currently focused app (Wispr-like)
     output_mode: str = "paste"
+    # How to insert text when output_mode == "paste"
+    # - type: emulate typing (most reliable, doesn't touch clipboard)
+    # - clipboard: put text on clipboard and press Ctrl/Cmd+V
+    insert_method: str = "type"
     preserve_clipboard: bool = True
-    vad_filter: bool = False
+    vad_filter: bool = True
     always_on_top: bool = True
     show_bar: bool = True
     remember_position: bool = False
@@ -166,6 +172,34 @@ def _vad_asset_path() -> Optional[Path]:
         return None
 
 
+def _win_get_foreground_hwnd() -> Optional[int]:
+    if platform.system().lower() != "windows":
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        hwnd = user32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+    except Exception:
+        return None
+
+
+def _win_set_foreground(hwnd: Optional[int]) -> bool:
+    if platform.system().lower() != "windows" or not hwnd:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        SW_SHOW = 5
+        user32.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOW)
+        return bool(user32.SetForegroundWindow(ctypes.c_void_p(hwnd)))
+    except Exception:
+        return False
+
+
 class PillContainer(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -219,7 +253,7 @@ class Recorder:
         with self._lock:
             return self._recording
 
-    def start(self) -> None:
+    def start(self, device: Optional[int] = None) -> None:
         with self._lock:
             if self._recording:
                 return
@@ -236,6 +270,7 @@ class Recorder:
             samplerate=self._samplerate,
             channels=1,
             dtype="float32",
+            device=device,
             callback=_callback,
         )
         self._stream.start()
@@ -281,11 +316,17 @@ class TranscribeWorker(QtCore.QObject):
                     # We'll still transcribe, just without VAD.
                     log().warning("vad_asset_missing path=%s", str(vad_path) if vad_path else "")
                     use_vad = False
+
+            extra = {}
+            if language is None:
+                # Improve auto language detection on short clips.
+                extra["language_detection_segments"] = 4
             segments, info = self._model.transcribe(
                 self._audio,
                 language=language,
                 beam_size=5,
                 vad_filter=use_vad,
+                **extra,
             )
             text = "".join(seg.text for seg in segments).strip()
             detected_lang = getattr(info, "language", "") or ""
@@ -308,10 +349,33 @@ class SettingsDialog(QtWidgets.QDialog):
         self.hotkey_edit.installEventFilter(self)
 
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "base.en", "small.en"])
+        self.model_combo.setEditable(True)
+        self.model_combo.addItems(["tiny", "base", "small", "medium", "large-v3-turbo", "base.en", "small.en", "medium.en"])
         idx = self.model_combo.findText(cfg.model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
+
+        self.mic_combo = QtWidgets.QComboBox()
+        self.mic_combo.addItem("System default", None)
+        try:
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+            for i, d in enumerate(devices):
+                if int(d.get("max_input_channels") or 0) <= 0:
+                    continue
+                api = ""
+                try:
+                    api = str(hostapis[int(d.get("hostapi") or 0)].get("name") or "")
+                except Exception:
+                    api = ""
+                name = str(d.get("name") or f"Device {i}")
+                label = f"{name} ({api})" if api else name
+                self.mic_combo.addItem(label, i)
+        except Exception:
+            pass
+        idx = self.mic_combo.findData(cfg.input_device)
+        if idx >= 0:
+            self.mic_combo.setCurrentIndex(idx)
 
         self.lang_combo = QtWidgets.QComboBox()
         self.lang_combo.addItem("Auto", "auto")
@@ -336,9 +400,17 @@ class SettingsDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.output_combo.setCurrentIndex(idx)
 
-        self.preserve_clip_chk = QtWidgets.QCheckBox("Preserve clipboard when pasting")
+        self.insert_combo = QtWidgets.QComboBox()
+        self.insert_combo.addItem("Type into active app (recommended)", "type")
+        self.insert_combo.addItem("Clipboard + Ctrl/Cmd+V", "clipboard")
+        idx = self.insert_combo.findData((cfg.insert_method or "type").strip().lower())
+        if idx >= 0:
+            self.insert_combo.setCurrentIndex(idx)
+
+        self.preserve_clip_chk = QtWidgets.QCheckBox("Preserve clipboard (when using Clipboard + Ctrl/Cmd+V)")
         self.preserve_clip_chk.setChecked(bool(cfg.preserve_clipboard))
         self.output_combo.currentIndexChanged.connect(self._sync_output_state)
+        self.insert_combo.currentIndexChanged.connect(self._sync_output_state)
 
         self.vad_chk = QtWidgets.QCheckBox("Enable VAD filter (helps with long silences)")
         self.vad_chk.setChecked(bool(cfg.vad_filter))
@@ -355,9 +427,11 @@ class SettingsDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         form.addRow("Hotkey (push-to-talk)", self.hotkey_edit)
         form.addRow("Model", self.model_combo)
+        form.addRow("Microphone", self.mic_combo)
         form.addRow("Language", self.lang_combo)
         form.addRow("Theme", self.theme_combo)
         form.addRow("Output", self.output_combo)
+        form.addRow("Insert method", self.insert_combo)
         form.addRow("", self.preserve_clip_chk)
         form.addRow("", self.vad_chk)
         form.addRow("", self.on_top_chk)
@@ -387,15 +461,19 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _sync_output_state(self):
         is_paste = str(self.output_combo.currentData()) == "paste"
-        self.preserve_clip_chk.setEnabled(is_paste)
+        insert_method = str(self.insert_combo.currentData() or "type")
+        self.insert_combo.setEnabled(is_paste)
+        self.preserve_clip_chk.setEnabled(is_paste and insert_method == "clipboard")
 
     def updated_config(self) -> AppConfig:
         cfg = AppConfig(**asdict(self._cfg))
         cfg.hotkey = (self.hotkey_edit.text() or "f9").strip().lower()
         cfg.model = self.model_combo.currentText().strip()
+        cfg.input_device = self.mic_combo.currentData()
         cfg.language = str(self.lang_combo.currentData())
         cfg.theme = str(self.theme_combo.currentData())
         cfg.output_mode = str(self.output_combo.currentData())
+        cfg.insert_method = str(self.insert_combo.currentData())
         cfg.preserve_clipboard = bool(self.preserve_clip_chk.isChecked())
         cfg.vad_filter = bool(self.vad_chk.isChecked())
         cfg.always_on_top = bool(self.on_top_chk.isChecked())
@@ -739,6 +817,8 @@ class App(QtCore.QObject):
         self._model_lock = threading.Lock()
         self._model: Optional[WhisperModel] = None
         self._transcribing = False
+        self._inserting = False
+        self._ptt_hwnd: Optional[int] = None
 
         self.hotkeys = HotkeyListener(self.cfg.hotkey)
         self.hotkeys.pressed.connect(self.on_ptt_pressed)
@@ -821,12 +901,16 @@ class App(QtCore.QObject):
 
     @QtCore.Slot()
     def on_ptt_pressed(self):
-        if self._transcribing:
+        if self._transcribing or self._inserting:
             return
         if self.recorder.recording:
             return
+
+        hwnd = _win_get_foreground_hwnd()
+        if hwnd:
+            self._ptt_hwnd = hwnd
         try:
-            self.recorder.start()
+            self.recorder.start(device=self.cfg.input_device)
             if self.cfg.show_bar:
                 self.overlay.set_state_recording()
         except Exception as e:
@@ -837,8 +921,14 @@ class App(QtCore.QObject):
 
     @QtCore.Slot()
     def on_ptt_released(self):
+        if self._inserting:
+            return
         if not self.recorder.recording:
             return
+
+        hwnd = _win_get_foreground_hwnd()
+        if hwnd:
+            self._ptt_hwnd = hwnd
         audio = self.recorder.stop()
         if audio.size == 0:
             if self.cfg.show_bar:
@@ -876,22 +966,36 @@ class App(QtCore.QObject):
 
     @QtCore.Slot(str, str, float)
     def on_transcribed(self, text: str, lang: str, prob: float):
-        self._transcribing = False
         text = (text or "").strip()
         if not text:
+            self._transcribing = False
             self._notify(APP_NAME, "No speech detected.")
             if self.cfg.show_bar:
                 self.overlay.set_state_idle()
             return
 
-        mode = (self.cfg.output_mode or "paste").strip().lower()
-        if mode == "clipboard":
-            QtWidgets.QApplication.clipboard().setText(text)
-        else:
-            self._paste_transcript(text)
-
-        if self.cfg.show_bar:
-            self.overlay.set_state_idle()
+        try:
+            mode = (self.cfg.output_mode or "paste").strip().lower()
+            if mode == "clipboard":
+                QtWidgets.QApplication.clipboard().setText(text)
+            else:
+                self._inserting = True
+                try:
+                    self._insert_transcript(text)
+                finally:
+                    self._inserting = False
+        except Exception as e:
+            log().exception("output_failed")
+            # Fallback: at least leave the transcript in the clipboard.
+            try:
+                QtWidgets.QApplication.clipboard().setText(text)
+            except Exception:
+                pass
+            self._notify(APP_NAME, f"Output error: {type(e).__name__}: {e} (copied to clipboard)")
+        finally:
+            self._transcribing = False
+            if self.cfg.show_bar:
+                self.overlay.set_state_idle()
 
     @QtCore.Slot(str)
     def on_transcribe_failed(self, err: str):
@@ -903,18 +1007,36 @@ class App(QtCore.QObject):
 
     def _send_paste_shortcut(self):
         is_macos = platform.system().lower() == "darwin"
-        mod = keyboard.Key.cmd if is_macos else keyboard.Key.ctrl
+        mod = keyboard.Key.cmd if is_macos else keyboard.Key.ctrl_l
         ctl = keyboard.Controller()
+        v_key = keyboard.KeyCode.from_char("v")
         # tiny delay so the active app regains focus after key-up
-        time.sleep(0.05)
+        time.sleep(0.06)
         try:
             with ctl.pressed(mod):
-                ctl.press("v")
-                ctl.release("v")
+                time.sleep(0.01)
+                ctl.press(v_key)
+                ctl.release(v_key)
         except Exception:
             pass
 
+    def _restore_focus_target(self):
+        _win_set_foreground(self._ptt_hwnd)
+
+    def _insert_transcript(self, text: str):
+        method = (self.cfg.insert_method or "type").strip().lower()
+        self._restore_focus_target()
+        time.sleep(0.06)
+        if method == "clipboard":
+            self._paste_transcript(text)
+            return
+
+        ctl = keyboard.Controller()
+        ctl.type(text)
+
     def _paste_transcript(self, text: str):
+        self._restore_focus_target()
+        time.sleep(0.06)
         clip = QtWidgets.QApplication.clipboard()
         old_md = None
         if self.cfg.preserve_clipboard:
@@ -922,12 +1044,12 @@ class App(QtCore.QObject):
 
         clip.setText(text)
         QtWidgets.QApplication.processEvents()
-        time.sleep(0.05)
+        time.sleep(0.12)
         self._send_paste_shortcut()
 
         if old_md is not None:
             # Give the target app a moment to pull from clipboard.
-            time.sleep(0.12)
+            time.sleep(0.6)
             clip.setMimeData(old_md)
             QtWidgets.QApplication.processEvents()
 
