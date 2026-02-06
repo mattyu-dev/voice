@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, asdict
+import math
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -64,6 +66,7 @@ class AppConfig:
     language: str = "auto"  # auto|en|fr
     device: str = "cpu"  # cpu|cuda
     compute_type: str = "int8"  # int8 (cpu), float16 (cuda), etc.
+    theme: str = "system"  # system|dark|light
     # clipboard: copy transcript to clipboard
     # paste: paste into the currently focused app (Wispr-like)
     output_mode: str = "paste"
@@ -134,6 +137,35 @@ def open_path(path: str) -> None:
         pass
 
 
+def _resolved_theme(cfg_theme: str) -> str:
+    t = (cfg_theme or "system").strip().lower()
+    if t in ("dark", "light"):
+        return t
+
+    # System theme (best-effort). Default to dark to match Wispr's vibe.
+    try:
+        sh = QtGui.QGuiApplication.styleHints()
+        cs = sh.colorScheme()
+        if cs == QtCore.Qt.ColorScheme.Light:
+            return "light"
+        if cs == QtCore.Qt.ColorScheme.Dark:
+            return "dark"
+    except Exception:
+        pass
+    return "dark"
+
+
+def _vad_asset_path() -> Optional[Path]:
+    # faster-whisper ships the Silero VAD model as a package asset.
+    try:
+        import faster_whisper  # local import to avoid hard dependency ordering issues in packaging
+
+        pkg_dir = Path(faster_whisper.__file__).resolve().parent
+        return pkg_dir / "assets" / "silero_vad_v6.onnx"
+    except Exception:
+        return None
+
+
 class PillContainer(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -142,6 +174,11 @@ class PillContainer(QtWidgets.QWidget):
 
         self._bg = QtGui.QColor(10, 12, 16, 235)
         self._border = QtGui.QColor(255, 255, 255, 31)  # ~0.12 alpha
+
+    def set_colors(self, bg: QtGui.QColor, border: QtGui.QColor) -> None:
+        self._bg = bg
+        self._border = border
+        self.update()
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -236,11 +273,19 @@ class TranscribeWorker(QtCore.QObject):
     def run(self):
         try:
             language = None if self._cfg.language.strip().lower() == "auto" else self._cfg.language.strip().lower()
+            use_vad = bool(self._cfg.vad_filter)
+            if use_vad:
+                vad_path = _vad_asset_path()
+                if not vad_path or not vad_path.exists():
+                    # Don't brick transcription if packaging misses the asset.
+                    # We'll still transcribe, just without VAD.
+                    log().warning("vad_asset_missing path=%s", str(vad_path) if vad_path else "")
+                    use_vad = False
             segments, info = self._model.transcribe(
                 self._audio,
                 language=language,
                 beam_size=5,
-                vad_filter=bool(self._cfg.vad_filter),
+                vad_filter=use_vad,
             )
             text = "".join(seg.text for seg in segments).strip()
             detected_lang = getattr(info, "language", "") or ""
@@ -276,6 +321,14 @@ class SettingsDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.lang_combo.setCurrentIndex(idx)
 
+        self.theme_combo = QtWidgets.QComboBox()
+        self.theme_combo.addItem("System", "system")
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Light", "light")
+        idx = self.theme_combo.findData((cfg.theme or "system").strip().lower())
+        if idx >= 0:
+            self.theme_combo.setCurrentIndex(idx)
+
         self.output_combo = QtWidgets.QComboBox()
         self.output_combo.addItem("Paste into active app (Wispr-like)", "paste")
         self.output_combo.addItem("Copy to clipboard", "clipboard")
@@ -303,6 +356,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("Hotkey (push-to-talk)", self.hotkey_edit)
         form.addRow("Model", self.model_combo)
         form.addRow("Language", self.lang_combo)
+        form.addRow("Theme", self.theme_combo)
         form.addRow("Output", self.output_combo)
         form.addRow("", self.preserve_clip_chk)
         form.addRow("", self.vad_chk)
@@ -340,6 +394,7 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.hotkey = (self.hotkey_edit.text() or "f9").strip().lower()
         cfg.model = self.model_combo.currentText().strip()
         cfg.language = str(self.lang_combo.currentData())
+        cfg.theme = str(self.theme_combo.currentData())
         cfg.output_mode = str(self.output_combo.currentData())
         cfg.preserve_clipboard = bool(self.preserve_clip_chk.isChecked())
         cfg.vad_filter = bool(self.vad_chk.isChecked())
@@ -354,6 +409,7 @@ class IndicatorWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._mode = "idle"  # idle|rec|work
         self._phase = 0.0
+        self._fg = QtGui.QColor(255, 255, 255)
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(60)
         self._timer.timeout.connect(self._tick)
@@ -375,6 +431,10 @@ class IndicatorWidget(QtWidgets.QWidget):
             self._timer.stop()
         self.update()
 
+    def set_foreground(self, color: QtGui.QColor) -> None:
+        self._fg = QtGui.QColor(color)
+        self.update()
+
     def _tick(self):
         self._phase += 0.35
         self.update()
@@ -392,9 +452,11 @@ class IndicatorWidget(QtWidgets.QWidget):
             x0 = int((r.width() - total) / 2)
             y0 = int((r.height() - dot) / 2)
             for i in range(n):
-                c = QtGui.QColor(255, 255, 255, 80)
+                c = QtGui.QColor(self._fg)
+                c.setAlpha(80)
                 if i in (4, 5, 6):
-                    c = QtGui.QColor(255, 255, 255, 110)
+                    c = QtGui.QColor(self._fg)
+                    c.setAlpha(110)
                 p.setPen(QtCore.Qt.NoPen)
                 p.setBrush(c)
                 p.drawEllipse(QtCore.QRectF(x0 + i * (dot + gap), y0, dot, dot))
@@ -411,7 +473,8 @@ class IndicatorWidget(QtWidgets.QWidget):
             active = int(self._phase) % n
             for i in range(n):
                 a = 90 if i != active else 180
-                c = QtGui.QColor(255, 255, 255, a)
+                c = QtGui.QColor(self._fg)
+                c.setAlpha(a)
                 p.setPen(QtCore.Qt.NoPen)
                 p.setBrush(c)
                 p.drawEllipse(QtCore.QRectF(x0 + i * (dot + gap), y, dot, dot))
@@ -428,7 +491,9 @@ class IndicatorWidget(QtWidgets.QWidget):
         base_y = int(r.height() / 2)
 
         p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor(255, 255, 255, 220))
+        c = QtGui.QColor(self._fg)
+        c.setAlpha(220)
+        p.setBrush(c)
         for i in range(n):
             t = self._phase + i * 0.55
             # a few combined sines to avoid looking too uniform
@@ -494,22 +559,58 @@ class Overlay(QtWidgets.QWidget):
         self.container.setLayout(row)
 
         root = QtWidgets.QVBoxLayout()
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self.container)
+        # Note: we intentionally pad the window so the drop shadow cannot be clipped by the top-level window bounds.
+        root.setContentsMargins(0, 0, 0, 0)  # updated after shadow is configured
+        root.addWidget(self.container, 0, QtCore.Qt.AlignCenter)
         self.setLayout(root)
 
-        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(32)
-        shadow.setOffset(0, 12)
-        shadow.setColor(QtGui.QColor(0, 0, 0, 120))
-        self.container.setGraphicsEffect(shadow)
+        self._shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(20)
+        self._shadow.setOffset(0, 8)
+        self._shadow.setColor(QtGui.QColor(0, 0, 0, 110))
+        self.container.setGraphicsEffect(self._shadow)
+        self._sync_shadow_padding()
 
         self._autosize()
+        self.apply_theme(self._cfg)
         self.set_state_idle()
+
+    def _sync_shadow_padding(self) -> None:
+        blur = float(self._shadow.blurRadius() or 0.0)
+        off = self._shadow.offset()
+        dx = float(getattr(off, "x", lambda: 0.0)())
+        dy = float(getattr(off, "y", lambda: 0.0)())
+
+        left = int(math.ceil(blur + max(0.0, -dx)))
+        right = int(math.ceil(blur + max(0.0, dx)))
+        top = int(math.ceil(blur + max(0.0, -dy)))
+        bottom = int(math.ceil(blur + max(0.0, dy)))
+
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(left, top, right, bottom)
 
     def _autosize(self):
         self.container.adjustSize()
         self.adjustSize()
+
+    def apply_theme(self, cfg: AppConfig) -> None:
+        effective = _resolved_theme(getattr(cfg, "theme", "system"))
+        if effective == "light":
+            bg = QtGui.QColor(248, 248, 250, 242)
+            border = QtGui.QColor(0, 0, 0, 28)
+            fg = QtGui.QColor(16, 18, 24)
+            shadow = QtGui.QColor(0, 0, 0, 80)
+        else:
+            bg = QtGui.QColor(10, 12, 16, 235)
+            border = QtGui.QColor(255, 255, 255, 31)
+            fg = QtGui.QColor(255, 255, 255)
+            shadow = QtGui.QColor(0, 0, 0, 110)
+
+        self.container.set_colors(bg, border)
+        self.indicator.set_foreground(fg)
+        self._shadow.setColor(shadow)
+        self.update()
 
     def set_config(self, cfg: AppConfig):
         self._cfg = cfg
@@ -518,6 +619,7 @@ class Overlay(QtWidgets.QWidget):
             flags |= QtCore.Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show() if cfg.show_bar else self.hide()
+        self.apply_theme(cfg)
         self.set_state_idle()
 
     def set_state_idle(self):
@@ -626,6 +728,13 @@ class App(QtCore.QObject):
         self.overlay.quit_requested.connect(self.quit)
         self.overlay.stop_requested.connect(self.on_stop_requested)
 
+        # If the user selected "System" theme, track OS theme changes live.
+        self._style_hints = QtGui.QGuiApplication.styleHints()
+        try:
+            self._style_hints.colorSchemeChanged.connect(self._on_system_theme_changed)
+        except Exception:
+            pass
+
         self.recorder = Recorder(samplerate=16000)
         self._model_lock = threading.Lock()
         self._model: Optional[WhisperModel] = None
@@ -644,6 +753,14 @@ class App(QtCore.QObject):
             self._place_default()
 
         self.overlay.show() if self.cfg.show_bar else self.overlay.hide()
+
+    @QtCore.Slot(object)
+    def _on_system_theme_changed(self, _scheme=None):
+        if (self.cfg.theme or "system").strip().lower() == "system":
+            try:
+                self.overlay.apply_theme(self.cfg)
+            except Exception:
+                pass
 
     def _place_default(self):
         screen = QtGui.QGuiApplication.primaryScreen()

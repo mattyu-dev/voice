@@ -41,6 +41,7 @@ Right-click the Flow bar or use the tray icon to open Settings:
 - Hotkey (push-to-talk)
 - Model (tiny/base/small, multilingual or `.en`)
 - Language (auto/en/fr)
+- Theme (system/dark/light)
 - Output (paste into active app or copy to clipboard)
 - Preserve clipboard when pasting
 - Remember last dragged position (otherwise bottom-center)
@@ -55,7 +56,7 @@ Right-click the Flow bar or use the tray icon to open Settings:
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-pyinstaller --noconfirm --onefile --windowed --name Voice .\voice_gui.py
+pyinstaller --noconfirm .\Voice.spec
 ```
 
 The built executable will be in `.\dist\Voice.exe`.
