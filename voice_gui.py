@@ -279,7 +279,7 @@ class Overlay(QtWidgets.QWidget):
         self.menu_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.menu_btn.setAutoRaise(True)
         self._menu = QtWidgets.QMenu(self)
-        act_settings = self._menu.addAction("Settings…")
+        act_settings = self._menu.addAction("Settings...")
         act_settings.triggered.connect(self.open_settings.emit)
         act_quit = self._menu.addAction("Quit")
         act_quit.triggered.connect(self.quit_requested.emit)
@@ -375,12 +375,12 @@ class Overlay(QtWidgets.QWidget):
 
     def set_state_recording(self):
         self._apply_style(state="rec")
-        self.status.setText("Listening…")
+        self.status.setText("Listening...")
         self._autosize()
 
     def set_state_transcribing(self):
         self._apply_style(state="work")
-        self.status.setText("Transcribing…")
+        self.status.setText("Transcribing...")
         self._autosize()
 
     def show_transcript(self, text: str, lang: str = "", prob: float = 0.0):
@@ -388,7 +388,7 @@ class Overlay(QtWidgets.QWidget):
         prefix = ""
         if lang:
             prefix = f"{lang.upper()} "
-        self.status.setText(f"{prefix}{text[:60]}{'…' if len(text) > 60 else ''}")
+        self.status.setText(f"{prefix}{text[:60]}{'...' if len(text) > 60 else ''}")
         self._autosize()
 
         # Return to idle after a short delay.
@@ -491,7 +491,7 @@ class App(QtCore.QObject):
         tray = QtWidgets.QSystemTrayIcon(icon)
         tray.setToolTip(APP_NAME)
         menu = QtWidgets.QMenu()
-        act_settings = menu.addAction("Settings…")
+        act_settings = menu.addAction("Settings...")
         act_settings.triggered.connect(self.show_settings)
         act_quit = menu.addAction("Quit")
         act_quit.triggered.connect(self.quit)
@@ -549,7 +549,7 @@ class App(QtCore.QObject):
         self._transcribing = False
         text = (text or "").strip()
         if not text:
-            self.overlay.show_transcript("…")
+            self.overlay.show_transcript("...")
             return
 
         QtWidgets.QApplication.clipboard().setText(text)
