@@ -1,6 +1,8 @@
+import logging
 import json
 import os
 import platform
+import subprocess
 import sys
 import threading
 import time
@@ -15,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 APP_NAME = "Voice"
+LOG_FILE_NAME = "voice.log"
 
 
 def _app_config_path() -> str:
@@ -96,6 +99,76 @@ def save_config(cfg: AppConfig) -> None:
         json.dump(asdict(cfg), f, indent=2)
 
 
+def _log_path() -> str:
+    return os.path.join(os.path.dirname(_app_config_path()), LOG_FILE_NAME)
+
+
+def init_logging() -> str:
+    path = _log_path()
+    _ensure_parent_dir(path)
+    logger = logging.getLogger(APP_NAME.lower())
+    logger.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+        fh = logging.FileHandler(path, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(fh)
+    return path
+
+
+def log() -> logging.Logger:
+    return logging.getLogger(APP_NAME.lower())
+
+
+def open_path(path: str) -> None:
+    system = platform.system().lower()
+    try:
+        if system == "windows":
+            os.startfile(path)  # type: ignore[attr-defined]
+            return
+        if system == "darwin":
+            subprocess.Popen(["open", path])
+            return
+        subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
+
+
+class PillContainer(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("container")
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+
+        self._bg = QtGui.QColor(10, 12, 16, 235)
+        self._border = QtGui.QColor(255, 255, 255, 31)  # ~0.12 alpha
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        # Ensure the area outside the pill is transparent (important for rounded corners + shadow).
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
+        p.fillRect(self.rect(), QtCore.Qt.transparent)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+
+        r = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = r.height() / 2.0
+
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(self._bg)
+        p.drawPath(path)
+
+        pen = QtGui.QPen(self._border)
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawPath(path)
+
+
 class Recorder:
     def __init__(self, samplerate: int = 16000):
         self._samplerate = samplerate
@@ -174,7 +247,8 @@ class TranscribeWorker(QtCore.QObject):
             prob = float(getattr(info, "language_probability", 0.0) or 0.0)
             self.finished.emit(text, detected_lang, prob)
         except Exception as e:
-            self.failed.emit(str(e))
+            log().exception("transcribe_worker_failed")
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -404,9 +478,7 @@ class Overlay(QtWidgets.QWidget):
         self._cfg = cfg
         self._drag_pos: Optional[QtCore.QPoint] = None
 
-        self.container = QtWidgets.QFrame()
-        self.container.setObjectName("container")
-        self.container.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.container = PillContainer()
 
         self.indicator = IndicatorWidget()
         self.stop_btn = StopButton()
@@ -432,27 +504,12 @@ class Overlay(QtWidgets.QWidget):
         shadow.setColor(QtGui.QColor(0, 0, 0, 120))
         self.container.setGraphicsEffect(shadow)
 
-        self._apply_style()
         self._autosize()
         self.set_state_idle()
 
     def _autosize(self):
         self.container.adjustSize()
         self.adjustSize()
-
-    def _apply_style(self):
-        # Wispr-ish: near-black pill with subtle border + shadow.
-        bg = "rgba(10, 12, 16, 235)"
-        border = "rgba(255, 255, 255, 0.12)"
-        self.setStyleSheet(
-            f"""
-            #container {{
-              background: {bg};
-              border: 1px solid {border};
-              border-radius: 9999px;
-            }}
-            """
-        )
 
     def set_config(self, cfg: AppConfig):
         self._cfg = cfg
@@ -461,7 +518,6 @@ class Overlay(QtWidgets.QWidget):
             flags |= QtCore.Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show() if cfg.show_bar else self.hide()
-        self._apply_style()
         self.set_state_idle()
 
     def set_state_idle(self):
@@ -561,6 +617,8 @@ class App(QtCore.QObject):
         super().__init__()
         # Ensure HF telemetry is off; this app should never ship content off-device.
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        self.log_path = init_logging()
+        log().info("app_start")
 
         self.cfg = load_config()
         self.overlay = Overlay(self.cfg)
@@ -610,6 +668,10 @@ class App(QtCore.QObject):
 
         act_settings = menu.addAction("Settings...")
         act_settings.triggered.connect(self.show_settings)
+
+        act_logs = menu.addAction("Open logs...")
+        act_logs.triggered.connect(self.open_logs)
+
         act_quit = menu.addAction("Quit")
         act_quit.triggered.connect(self.quit)
         tray.setContextMenu(menu)
@@ -651,6 +713,7 @@ class App(QtCore.QObject):
             if self.cfg.show_bar:
                 self.overlay.set_state_recording()
         except Exception as e:
+            log().exception("mic_start_failed")
             self._notify(APP_NAME, f"Microphone error: {e}")
             if self.cfg.show_bar:
                 self.overlay.set_state_idle()
@@ -707,6 +770,7 @@ class App(QtCore.QObject):
     @QtCore.Slot(str)
     def on_transcribe_failed(self, err: str):
         self._transcribing = False
+        log().error("transcription_failed: %s", err)
         self._notify(APP_NAME, f"Transcription error: {err}")
         if self.cfg.show_bar:
             self.overlay.set_state_idle()
@@ -740,6 +804,10 @@ class App(QtCore.QObject):
             time.sleep(0.12)
             clip.setMimeData(old_md)
             QtWidgets.QApplication.processEvents()
+
+    @QtCore.Slot()
+    def open_logs(self):
+        open_path(self.log_path)
 
     @QtCore.Slot()
     def show_settings(self):
@@ -780,6 +848,7 @@ class App(QtCore.QObject):
 
     @QtCore.Slot()
     def quit(self):
+        log().info("app_quit")
         if self.cfg.remember_position:
             pos = self.overlay.pos()
             self.cfg.window_pos = (pos.x(), pos.y())
