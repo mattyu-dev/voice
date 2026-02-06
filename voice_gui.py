@@ -64,6 +64,8 @@ class AppConfig:
     paste_after_copy: bool = False
     vad_filter: bool = False
     always_on_top: bool = True
+    show_bar: bool = True
+    show_transcript_toast: bool = True
     window_pos: Optional[Tuple[int, int]] = None
 
 
@@ -203,6 +205,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.on_top_chk = QtWidgets.QCheckBox("Always on top")
         self.on_top_chk.setChecked(bool(cfg.always_on_top))
 
+        self.show_bar_chk = QtWidgets.QCheckBox("Show Flow bar")
+        self.show_bar_chk.setChecked(bool(cfg.show_bar))
+
+        self.toast_chk = QtWidgets.QCheckBox("Show transcript bubble after release")
+        self.toast_chk.setChecked(bool(cfg.show_transcript_toast))
+
         form = QtWidgets.QFormLayout()
         form.addRow("Hotkey (push-to-talk)", self.hotkey_edit)
         form.addRow("Model", self.model_combo)
@@ -210,6 +218,8 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("", self.paste_chk)
         form.addRow("", self.vad_chk)
         form.addRow("", self.on_top_chk)
+        form.addRow("", self.show_bar_chk)
+        form.addRow("", self.toast_chk)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -239,12 +249,127 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.paste_after_copy = bool(self.paste_chk.isChecked())
         cfg.vad_filter = bool(self.vad_chk.isChecked())
         cfg.always_on_top = bool(self.on_top_chk.isChecked())
+        cfg.show_bar = bool(self.show_bar_chk.isChecked())
+        cfg.show_transcript_toast = bool(self.toast_chk.isChecked())
         return cfg
+
+
+class IndicatorWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mode = "idle"  # idle|rec|work
+        self._phase = 0.0
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self._tick)
+
+        self.setFixedHeight(18)
+        self.setFixedWidth(118)
+
+    def set_mode(self, mode: str):
+        mode = (mode or "idle").strip().lower()
+        if mode not in ("idle", "rec", "work"):
+            mode = "idle"
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._phase = 0.0
+        if mode in ("rec", "work"):
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def _tick(self):
+        self._phase += 0.35
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        r = self.rect()
+
+        if self._mode == "idle":
+            n = 11
+            dot = 3
+            gap = 7
+            total = n * dot + (n - 1) * gap
+            x0 = int((r.width() - total) / 2)
+            y0 = int((r.height() - dot) / 2)
+            for i in range(n):
+                c = QtGui.QColor(255, 255, 255, 80)
+                if i in (4, 5, 6):
+                    c = QtGui.QColor(255, 255, 255, 110)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(c)
+                p.drawEllipse(QtCore.QRectF(x0 + i * (dot + gap), y0, dot, dot))
+            return
+
+        if self._mode == "work":
+            # 3-dot bounce
+            n = 3
+            dot = 5
+            gap = 9
+            total = n * dot + (n - 1) * gap
+            x0 = int((r.width() - total) / 2)
+            y = int((r.height() - dot) / 2)
+            active = int(self._phase) % n
+            for i in range(n):
+                a = 90 if i != active else 180
+                c = QtGui.QColor(255, 255, 255, a)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(c)
+                p.drawEllipse(QtCore.QRectF(x0 + i * (dot + gap), y, dot, dot))
+            return
+
+        # recording: equalizer bars
+        n = 9
+        bar_w = 4
+        gap = 4
+        max_h = 16
+        min_h = 6
+        total = n * bar_w + (n - 1) * gap
+        x0 = int((r.width() - total) / 2)
+        base_y = int(r.height() / 2)
+
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 255, 255, 220))
+        for i in range(n):
+            t = self._phase + i * 0.55
+            # a few combined sines to avoid looking too uniform
+            v = (0.55 + 0.45 * np.sin(t)) * (0.55 + 0.45 * np.sin(t * 0.6 + 1.2))
+            h = min_h + (max_h - min_h) * float(v)
+            x = x0 + i * (bar_w + gap)
+            rect = QtCore.QRectF(x, base_y - h / 2, bar_w, h)
+            p.drawRoundedRect(rect, 2, 2)
+
+
+class StopButton(QtWidgets.QAbstractButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFixedSize(22, 22)
+        self.setToolTip("Stop")
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        r = self.rect().adjusted(1, 1, -1, -1)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor("#EF4444"))
+        p.drawEllipse(r)
+        # white stop square
+        s = 8
+        cx = r.center().x()
+        cy = r.center().y()
+        p.setBrush(QtGui.QColor("#FFFFFF"))
+        p.drawRoundedRect(QtCore.QRectF(cx - s / 2, cy - s / 2, s, s), 2, 2)
 
 
 class Overlay(QtWidgets.QWidget):
     open_settings = QtCore.Signal()
     quit_requested = QtCore.Signal()
+    stop_requested = QtCore.Signal()
 
     def __init__(self, cfg: AppConfig):
         flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool
@@ -253,6 +378,7 @@ class Overlay(QtWidgets.QWidget):
         super().__init__(None, flags)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setWindowTitle(APP_NAME)
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
 
         self._cfg = cfg
         self._drag_pos: Optional[QtCore.QPoint] = None
@@ -260,40 +386,16 @@ class Overlay(QtWidgets.QWidget):
         self.container = QtWidgets.QFrame()
         self.container.setObjectName("container")
 
-        self.mic = QtWidgets.QToolButton()
-        self.mic.setText("Mic")
-        self.mic.setCursor(QtCore.Qt.PointingHandCursor)
-        self.mic.setAutoRaise(True)
-
-        self.status = QtWidgets.QLabel()
-        self.status.setText(f"Hold {cfg.hotkey.upper()}")
-
-        self.gear = QtWidgets.QToolButton()
-        self.gear.setText("Settings")
-        self.gear.setCursor(QtCore.Qt.PointingHandCursor)
-        self.gear.setAutoRaise(True)
-        self.gear.clicked.connect(self.open_settings.emit)
-
-        self.menu_btn = QtWidgets.QToolButton()
-        self.menu_btn.setText("...")
-        self.menu_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.menu_btn.setAutoRaise(True)
-        self._menu = QtWidgets.QMenu(self)
-        act_settings = self._menu.addAction("Settings...")
-        act_settings.triggered.connect(self.open_settings.emit)
-        act_quit = self._menu.addAction("Quit")
-        act_quit.triggered.connect(self.quit_requested.emit)
-        self.menu_btn.setMenu(self._menu)
-        self.menu_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.indicator = IndicatorWidget()
+        self.stop_btn = StopButton()
+        self.stop_btn.clicked.connect(self.stop_requested.emit)
+        self.stop_btn.hide()
 
         row = QtWidgets.QHBoxLayout()
-        row.setContentsMargins(12, 10, 12, 10)
+        row.setContentsMargins(14, 10, 14, 10)
         row.setSpacing(10)
-        row.addWidget(self.mic)
-        row.addWidget(self.status)
-        row.addStretch(1)
-        row.addWidget(self.gear)
-        row.addWidget(self.menu_btn)
+        row.addWidget(self.indicator, 0, QtCore.Qt.AlignVCenter)
+        row.addWidget(self.stop_btn, 0, QtCore.Qt.AlignVCenter)
 
         self.container.setLayout(row)
 
@@ -303,101 +405,83 @@ class Overlay(QtWidgets.QWidget):
         self.setLayout(root)
 
         shadow = QtWidgets.QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 10)
-        shadow.setColor(QtGui.QColor(0, 0, 0, 110))
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QtGui.QColor(0, 0, 0, 120))
         self.container.setGraphicsEffect(shadow)
 
-        self._apply_style(state="idle")
+        self._apply_style()
         self._autosize()
+        self.set_state_idle()
 
     def _autosize(self):
         self.container.adjustSize()
         self.adjustSize()
 
-    def _apply_style(self, state: str):
-        if state == "idle":
-            bg = "#111827"
-            fg = "#F9FAFB"
-            accent = "#60A5FA"
-        elif state == "rec":
-            bg = "#DC2626"
-            fg = "#FFFFFF"
-            accent = "#FFFFFF"
-        elif state == "work":
-            bg = "#F59E0B"
-            fg = "#111827"
-            accent = "#111827"
-        else:
-            bg = "#7C3AED"
-            fg = "#FFFFFF"
-            accent = "#FFFFFF"
-
+    def _apply_style(self):
+        # Wispr-ish: near-black pill with subtle border + shadow.
+        bg = "rgba(10, 12, 16, 235)"
+        border = "rgba(255, 255, 255, 0.12)"
         self.setStyleSheet(
             f"""
             #container {{
               background: {bg};
-              color: {fg};
-              border-radius: 16px;
-            }}
-            QLabel {{
-              color: {fg};
-              font-size: 13px;
-              font-weight: 600;
-            }}
-            QToolButton {{
-              color: {accent};
-              font-size: 12px;
-              font-weight: 700;
-              padding: 4px 8px;
-            }}
-            QToolButton:hover {{
-              background: rgba(255,255,255,0.12);
-              border-radius: 10px;
+              border: 1px solid {border};
+              border-radius: 999px;
             }}
             """
         )
 
     def set_config(self, cfg: AppConfig):
         self._cfg = cfg
-        self.status.setText(f"Hold {cfg.hotkey.upper()}")
         flags = QtCore.Qt.FramelessWindowHint | QtCore.Qt.Tool
         if cfg.always_on_top:
             flags |= QtCore.Qt.WindowStaysOnTopHint
         self.setWindowFlags(flags)
-        self.show()
-        self._apply_style(state="idle")
+        self.show() if cfg.show_bar else self.hide()
+        self._apply_style()
+        self.set_state_idle()
 
     def set_state_idle(self):
-        self._apply_style(state="idle")
-        self.status.setText(f"Hold {self._cfg.hotkey.upper()}")
+        self.indicator.set_mode("idle")
+        self.stop_btn.hide()
         self._autosize()
 
     def set_state_recording(self):
-        self._apply_style(state="rec")
-        self.status.setText("Listening...")
+        self.indicator.set_mode("rec")
+        self.stop_btn.show()
         self._autosize()
 
     def set_state_transcribing(self):
-        self._apply_style(state="work")
-        self.status.setText("Transcribing...")
+        self.indicator.set_mode("work")
+        self.stop_btn.hide()
         self._autosize()
 
     def show_transcript(self, text: str, lang: str = "", prob: float = 0.0):
-        self._apply_style(state="idle")
-        prefix = ""
-        if lang:
-            prefix = f"{lang.upper()} "
-        self.status.setText(f"{prefix}{text[:60]}{'...' if len(text) > 60 else ''}")
-        self._autosize()
+        self.set_state_idle()
+        if not self._cfg.show_transcript_toast:
+            QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(self.width() // 2, 0)), "Copied", self)
+            return
+        prefix = f"{lang.upper()} " if lang else ""
+        msg = f"{prefix}{text}".strip()
+        QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(self.width() // 2, 0)), msg, self)
 
-        # Return to idle after a short delay.
-        QtCore.QTimer.singleShot(1800, self.set_state_idle)
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.open_settings.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         if event.button() == QtCore.Qt.LeftButton:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
+            return
+        if event.button() == QtCore.Qt.RightButton:
+            self._show_context_menu(event.globalPosition().toPoint())
+            event.accept()
+            return
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent):
         if self._drag_pos is not None and event.buttons() & QtCore.Qt.LeftButton:
@@ -408,6 +492,15 @@ class Overlay(QtWidgets.QWidget):
         if event.button() == QtCore.Qt.LeftButton:
             self._drag_pos = None
             event.accept()
+
+    def _show_context_menu(self, global_pos: QtCore.QPoint):
+        menu = QtWidgets.QMenu(self)
+        act_settings = menu.addAction("Settings...")
+        act_settings.triggered.connect(self.open_settings.emit)
+        menu.addSeparator()
+        act_quit = menu.addAction("Quit")
+        act_quit.triggered.connect(self.quit_requested.emit)
+        menu.exec(global_pos)
 
 
 class HotkeyListener(QtCore.QObject):
@@ -456,6 +549,7 @@ class App(QtCore.QObject):
         self.overlay = Overlay(self.cfg)
         self.overlay.open_settings.connect(self.show_settings)
         self.overlay.quit_requested.connect(self.quit)
+        self.overlay.stop_requested.connect(self.on_stop_requested)
 
         self.recorder = Recorder(samplerate=16000)
         self._model_lock = threading.Lock()
@@ -474,7 +568,7 @@ class App(QtCore.QObject):
         else:
             self._place_default()
 
-        self.overlay.show()
+        self.overlay.show() if self.cfg.show_bar else self.overlay.hide()
 
     def _place_default(self):
         screen = QtGui.QGuiApplication.primaryScreen()
@@ -491,6 +585,12 @@ class App(QtCore.QObject):
         tray = QtWidgets.QSystemTrayIcon(icon)
         tray.setToolTip(APP_NAME)
         menu = QtWidgets.QMenu()
+
+        self.act_show_bar = menu.addAction("Show Flow bar")
+        self.act_show_bar.setCheckable(True)
+        self.act_show_bar.setChecked(bool(self.cfg.show_bar))
+        self.act_show_bar.triggered.connect(self.toggle_bar)
+
         act_settings = menu.addAction("Settings...")
         act_settings.triggered.connect(self.show_settings)
         act_quit = menu.addAction("Quit")
@@ -513,7 +613,8 @@ class App(QtCore.QObject):
             return
         try:
             self.recorder.start()
-            self.overlay.set_state_recording()
+            if self.cfg.show_bar:
+                self.overlay.set_state_recording()
         except Exception as e:
             self.overlay.show_transcript(f"Mic error: {e}")
 
@@ -523,14 +624,17 @@ class App(QtCore.QObject):
             return
         audio = self.recorder.stop()
         if audio.size == 0:
-            self.overlay.set_state_idle()
+            if self.cfg.show_bar:
+                self.overlay.set_state_idle()
             return
         if self._transcribing:
-            self.overlay.set_state_idle()
+            if self.cfg.show_bar:
+                self.overlay.set_state_idle()
             return
 
         self._transcribing = True
-        self.overlay.set_state_transcribing()
+        if self.cfg.show_bar:
+            self.overlay.set_state_transcribing()
 
         model = self._get_model()
         self._worker = TranscribeWorker(model, audio, self.cfg)
@@ -549,19 +653,22 @@ class App(QtCore.QObject):
         self._transcribing = False
         text = (text or "").strip()
         if not text:
-            self.overlay.show_transcript("...")
+            if self.cfg.show_bar:
+                self.overlay.show_transcript("...")
             return
 
         QtWidgets.QApplication.clipboard().setText(text)
         if self.cfg.paste_after_copy:
             self._paste_now()
 
-        self.overlay.show_transcript(text, lang=lang, prob=prob)
+        if self.cfg.show_bar:
+            self.overlay.show_transcript(text, lang=lang, prob=prob)
 
     @QtCore.Slot(str)
     def on_transcribe_failed(self, err: str):
         self._transcribing = False
-        self.overlay.show_transcript(f"ASR error: {err}")
+        if self.cfg.show_bar:
+            self.overlay.show_transcript(f"ASR error: {err}")
 
     def _paste_now(self):
         is_macos = platform.system().lower() == "darwin"
@@ -595,6 +702,20 @@ class App(QtCore.QObject):
         self.hotkeys.set_hotkey(self.cfg.hotkey)
         with self._model_lock:
             self._model = None  # reload with new model settings on next use
+        if hasattr(self, "act_show_bar"):
+            self.act_show_bar.setChecked(bool(self.cfg.show_bar))
+
+    @QtCore.Slot()
+    def toggle_bar(self):
+        self.cfg.show_bar = bool(self.act_show_bar.isChecked())
+        save_config(self.cfg)
+        self.overlay.set_config(self.cfg)
+
+    @QtCore.Slot()
+    def on_stop_requested(self):
+        # Allows stopping via UI while recording.
+        if self.recorder.recording:
+            self.on_ptt_released()
 
     @QtCore.Slot()
     def quit(self):
@@ -607,6 +728,20 @@ class App(QtCore.QObject):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    # Wispr-ish tooltips for transcript bubble.
+    app.setStyleSheet(
+        """
+        QToolTip {
+          background-color: rgba(10, 12, 16, 240);
+          color: #F9FAFB;
+          border: 1px solid rgba(255,255,255,0.14);
+          border-radius: 12px;
+          padding: 8px 10px;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        """
+    )
     _ = App()
     sys.exit(app.exec())
 
