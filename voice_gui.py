@@ -66,6 +66,7 @@ class AppConfig:
     always_on_top: bool = True
     show_bar: bool = True
     show_transcript_toast: bool = True
+    remember_position: bool = False
     window_pos: Optional[Tuple[int, int]] = None
 
 
@@ -208,6 +209,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.show_bar_chk = QtWidgets.QCheckBox("Show Flow bar")
         self.show_bar_chk.setChecked(bool(cfg.show_bar))
 
+        self.remember_pos_chk = QtWidgets.QCheckBox("Remember last dragged position (otherwise bottom-center)")
+        self.remember_pos_chk.setChecked(bool(cfg.remember_position))
+
         self.toast_chk = QtWidgets.QCheckBox("Show transcript bubble after release")
         self.toast_chk.setChecked(bool(cfg.show_transcript_toast))
 
@@ -219,6 +223,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("", self.vad_chk)
         form.addRow("", self.on_top_chk)
         form.addRow("", self.show_bar_chk)
+        form.addRow("", self.remember_pos_chk)
         form.addRow("", self.toast_chk)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
@@ -251,6 +256,7 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.always_on_top = bool(self.on_top_chk.isChecked())
         cfg.show_bar = bool(self.show_bar_chk.isChecked())
         cfg.show_transcript_toast = bool(self.toast_chk.isChecked())
+        cfg.remember_position = bool(self.remember_pos_chk.isChecked())
         return cfg
 
 
@@ -563,7 +569,7 @@ class App(QtCore.QObject):
 
         self.tray = self._create_tray()
 
-        if self.cfg.window_pos:
+        if self.cfg.remember_position and self.cfg.window_pos:
             self.overlay.move(self.cfg.window_pos[0], self.cfg.window_pos[1])
         else:
             self._place_default()
@@ -691,8 +697,11 @@ class App(QtCore.QObject):
         new_cfg = dlg.updated_config()
 
         # Persist window position.
-        pos = self.overlay.pos()
-        new_cfg.window_pos = (pos.x(), pos.y())
+        if new_cfg.remember_position:
+            pos = self.overlay.pos()
+            new_cfg.window_pos = (pos.x(), pos.y())
+        else:
+            new_cfg.window_pos = None
 
         self.cfg = new_cfg
         save_config(self.cfg)
@@ -719,8 +728,11 @@ class App(QtCore.QObject):
 
     @QtCore.Slot()
     def quit(self):
-        pos = self.overlay.pos()
-        self.cfg.window_pos = (pos.x(), pos.y())
+        if self.cfg.remember_position:
+            pos = self.overlay.pos()
+            self.cfg.window_pos = (pos.x(), pos.y())
+        else:
+            self.cfg.window_pos = None
         save_config(self.cfg)
         self.hotkeys.stop()
         QtWidgets.QApplication.quit()
