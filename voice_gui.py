@@ -736,7 +736,16 @@ class App(QtCore.QObject):
         if self.cfg.show_bar:
             self.overlay.set_state_transcribing()
 
-        model = self._get_model()
+        try:
+            model = self._get_model()
+        except Exception as e:
+            self._transcribing = False
+            log().exception("model_load_failed")
+            self._notify(APP_NAME, f"Model load error: {type(e).__name__}: {e}")
+            if self.cfg.show_bar:
+                self.overlay.set_state_idle()
+            return
+
         self._worker = TranscribeWorker(model, audio, self.cfg)
         self._thread = QtCore.QThread()
         self._worker.moveToThread(self._thread)
