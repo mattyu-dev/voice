@@ -63,3 +63,4 @@ pyinstaller --noconfirm .\Voice.spec
 ```
 
 The built executable will be in `.\dist\Voice.exe`.
+

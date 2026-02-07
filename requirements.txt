@@ -4,3 +4,4 @@ pynput
 pyperclip
 PySide6
 sounddevice
+
